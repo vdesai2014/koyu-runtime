@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "koyu-runtime"
+version = "0.1.0"
+description = "koyu-runtime — agent-operable supervisor over supervisord"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6",
+    "supervisor>=4.3",
+    "iceoryx2==0.8.1",
+    "pillow>=10",
+    "pydantic>=2",
+    "numpy>=1.24",
+    "pyarrow>=14",
+    "av>=11",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+koyu = "cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["warden*", "ipc*", "cli*", "services*"]
+exclude = ["warden.tests*", "ipc.tests*", "cli.tests*", "services.tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["warden/tests", "ipc/tests", "cli/tests", "services/tests"]
