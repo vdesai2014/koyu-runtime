@@ -48,3 +48,7 @@ class EpisodeSidecar(RecordingContext):
     fps: float                               # measured landed rate (not the requested param)
     features: dict = Field(default_factory=dict)
     encoding: dict = Field(default_factory=dict)
+    # Verdicts: judgments delivered at stop-time via the recorder's verdict
+    # inbox (see services/inbox.py + interfaces.md). Not capture facts.
+    reward: float | None = None                       # episode outcome, 0..1
+    events: list = Field(default_factory=list)        # [{"t": ns, "type": ...}]

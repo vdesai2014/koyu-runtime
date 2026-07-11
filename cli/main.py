@@ -23,7 +23,7 @@ import yaml
 
 from ipc import blackboard, checks
 from ipc import types as ipc_types
-from services.param_server import Inbox
+from services.inbox import Inbox, inbox_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -176,7 +176,7 @@ def _cmd_set(rt: Runtime, args) -> int:
     req = {"key": args.key, "value": value}
     if args.persist:
         req["persist"] = True
-    Inbox(rt.dir / "services" / "param_server" / "inbox" / _slug(args.topic)).submit(req)
+    Inbox(inbox_path(rt.dir, "param_server", _slug(args.topic))).submit(req)
     print(f"set {args.topic} {args.key}={value!r}" + (" (persist)" if args.persist else ""))
     return 0
 

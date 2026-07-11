@@ -37,6 +37,7 @@ from ipc import types
 from ipc.service import Service
 
 from .episode_schema import EpisodeSidecar, RecordingContext
+from .inbox import Inbox, inbox_path
 
 JITTER_NS = 5_000_000     # staleness slack on top of one source period
 TICK_HZ = 200             # clock poll cadence (Hz), far above any camera rate
@@ -60,6 +61,10 @@ class Source:
     kind: str                  # "video" | "column"
     rate_hz: float             # declared rate -> staleness tolerance + clock choice
     type_name: str = ""        # struct class name for the subscription (e.g. "CameraFrame")
+    paired: bool = False       # pair by frame_id == clock frame_id (lockstep answers,
+                               # e.g. eval actions) instead of timestamp window; a
+                               # missing match means "still cooking" -> the clock
+                               # frame is DEFERRED, never dropped and never an abort
 
 
 def tol_ns(s: Source) -> int:
@@ -99,7 +104,8 @@ class Outcome:
 
 
 def finalize(recordings_dir: Path, ctx: RecordingContext, rows: list,
-             sources: list[Source], record_hz: float = 0.0) -> Outcome:
+             sources: list[Source], record_hz: float = 0.0,
+             capture_id: str | None = None, verdict: dict | None = None) -> Outcome:
     """Write one episode bundle from captured rows of ``(ts_ns, {feature: value})``.
 
     Rows arrive already aligned (capture is clock-gated), so this is just the
@@ -126,7 +132,10 @@ def finalize(recordings_dir: Path, ctx: RecordingContext, rows: list,
 
         sidecar = EpisodeSidecar(**ctx.model_dump(), length=n, fps=fps,
                                  record_hz=record_hz or None,
-                                 features=_features(sources, rows[0][1]), encoding=ENCODING)
+                                 features=_features(sources, rows[0][1]), encoding=ENCODING,
+                                 **({"capture_id": capture_id} if capture_id else {}),
+                                 **({k: verdict[k] for k in ("reward", "events") if k in verdict}
+                                    if verdict else {}))
         (tmp / "episode.json").write_text(sidecar.model_dump_json(indent=2))
 
         final = recordings_dir / f"{_dirname(ts[0])}__{ctx.requested_manifest or 'unfiled'}__{sidecar.capture_id[:8]}"
@@ -226,6 +235,8 @@ class DataRecorder(Service):
         super().__init__("data_recorder")
 
     def _reset(self) -> None:
+        self.capture_id = ""                          # minted at START; "" = idle
+        self.deferred: list = []                      # clock frames awaiting a paired match
         self.rows: list[tuple[int, dict]] = []         # (clock ts_ns, {feature: value})
         self.cache: dict[str, Any] = {}                # topic -> latest sample (non-clock)
         self.snap: RecordingContext | None = None
@@ -241,13 +252,34 @@ class DataRecorder(Service):
         self.recordings.mkdir(exist_ok=True)
         _sweep_tmp(self.recordings)                    # crashed runs leave .tmp-* behind
         # the clock gets a small queue so a late tick can't drop a frame; the
-        # others are depth-1 latest-value reads (blackboard semantics over pub/sub)
+        # others are depth-1 latest-value reads (blackboard semantics over pub/sub).
+        #
+        # TODO(multi-buffer capture): non-clock sources at buffer=1 are sampled
+        # onto the clock spine — samples faster than the clock are DECIMATED by
+        # design. Lossless capture of faster-than-clock sources (e.g. 500 Hz
+        # torque under a 30 Hz camera clock) needs (a) drained multi-buffer
+        # subscriptions here AND (b) a format decision for sub-clock timelines
+        # (nested lists per row vs. separate timestamped columns). Also budget
+        # publisher buffer ceilings for deep-history subscribers before raising
+        # any buffer here — see the pool-sizing rule in design-doc §3.
+        #
+        # TODO(adversarial sync suite): constructed-state tests for the pairing
+        # logic under hostile timing — desynced cameras (constant offset, slow
+        # drift), mismatched frame rates (30 vs 29.97 vs 60), a source that
+        # stalls mid-episode then bursts, clock jitter at the tolerance edge,
+        # and lockstep actions arriving 0/1/2 ticks late (paired-mode deferral).
+        # Each case asserts either exact rows or a loud abort — never silent
+        # misalignment. Time is data: inject timestamps, no sleeps.
         self.subs = {
             s.topic: self.subscriber(s.topic, types.resolve(s.type_name),
                                      buffer=CLOCK_BUFFER if s is self.clock else 1)
             for s in self.sources
         }
         self.config = self.reader("recorder/config", types.RecorderConfig)
+        # identity + liveness for external processes (eval drivers, rater UIs):
+        # this capture_id IS the episode identity (ingest derives ep_<capture_id>)
+        self.telemetry = self.writer("recorder/telemetry", types.RecorderTelemetry)
+        self.verdicts = Inbox(inbox_path(self.home, "data_recorder", "verdicts"))
         self.on("recorder/control")
         self.episode = self.notifier("recorder/episode")
         self.tick(TICK_HZ)
@@ -265,10 +297,14 @@ class DataRecorder(Service):
             self.period_ns = int(1e9 / self.rec_hz) if self.rec_hz else 0
             self.t0_ns = time.time_ns()                # fence: ignore frames queued while idle
             self.clock_seen = time.monotonic()
+            self.capture_id = uuid4().hex              # THE episode identity, minted now
             self.state = "recording"
+            self._telemetry()
         elif event_id == CTL_DISCARD and self.state == "recording":
+            self._drain_verdicts(None)                 # discard -> park any verdicts, loudly
             self._reset()
             self.state = "idle"
+            self._telemetry()
         elif event_id == CTL_STOP and self.state == "recording":
             self._capture()                            # catch the clock queue's tail
             if self.state == "recording":              # the tail can still abort
@@ -281,6 +317,7 @@ class DataRecorder(Service):
         self._capture()
         if self.state != "recording":                  # capture may have aborted
             return
+        self._telemetry()
         if time.monotonic() - self.clock_seen > CLOCK_TIMEOUT_S:
             self._abort(f"clock {self.clock.topic!r} silent for {CLOCK_TIMEOUT_S}s")
         elif len(self.rows) >= MAX_FRAMES:
@@ -306,43 +343,89 @@ class DataRecorder(Service):
         frames = self.subs[self.clock.topic].drain()
         if frames:
             self.clock_seen = time.monotonic()         # liveness, even for unkept frames
-        for frame in frames:
-            if self.state == "recording":              # an abort mid-drain stops capture
-                self._frame(frame)
+        self.deferred.extend(frames)
+        while self.deferred and self.state == "recording":
+            if self._frame(self.deferred[0]):          # consumed (recorded/gated/abort)
+                self.deferred.pop(0)
+            else:                                       # paired wait: keep, retry next tick
+                if len(self.deferred) > CLOCK_BUFFER:
+                    self._abort("paired source never matched "
+                                f"frame {self.deferred[0].frame_id}")
+                break
 
-    def _frame(self, frame) -> None:
+    def _frame(self, frame) -> bool:
+        """Process one clock frame. Returns True if the frame was consumed
+        (recorded, gated out, fenced, or aborted) and False for a paired-mode
+        wait — the caller keeps the frame and retries next tick."""
+        # paired sources first: an unmatched answer means "still cooking", and
+        # the frame must not pass the fence/gate until it can actually land
+        for s in self.others:
+            if s.paired:
+                c = self.cache.get(s.topic)
+                if c is None or getattr(c, "frame_id", None) != getattr(frame, "frame_id", None):
+                    return False
         ts = int(frame.timestamp * 1e9)                # wall-clock seconds -> ns
         if ts < self.t0_ns:
-            return                                     # queued while idle
+            return True                                # queued while idle
         if ts < self.last_ts:
             self._abort("clock went backwards (NTP step?)")
-            return
+            return True
         self.last_ts = ts
         keep, self.next_due = gate(ts, self.next_due, self.period_ns)
         if not keep:
-            return
-        for s in self.others:                          # every source fresh at this frame?
+            return True
+        for s in self.others:                          # window sources fresh at this frame?
+            if s.paired:
+                continue                               # already matched above, exactly
             c = self.cache.get(s.topic)
             if c is None or abs(int(c.timestamp * 1e9) - ts) > tol_ns(s):
                 if self.rows:
                     self._abort(f"{s.topic!r} stale at t={ts}")   # mid-episode drift
-                return                                 # leading edge: wait for the source
+                return True                            # leading edge: wait for the source
         self.rows.append((ts, {
             self.clock.feature: self.clock.extract(frame),
             **{s.feature: s.extract(self.cache[s.topic]) for s in self.others},
         }))
+        return True
 
     def _abort(self, reason: str) -> None:
         print(f"[data_recorder] recording aborted: {reason}", flush=True)
+        self._drain_verdicts(None)
         self._reset()
         self.state = "idle"
+        self._telemetry()
         self.episode.ring(EP_FAILED)
 
     def _submit_finalize(self) -> None:
+        verdict = self._drain_verdicts(self.capture_id)
         self.pending.append(self.pool.submit(
-            finalize, self.recordings, self.snap, self.rows, self.sources, self.rec_hz))
+            finalize, self.recordings, self.snap, self.rows, self.sources, self.rec_hz,
+            self.capture_id, verdict))
         self._reset()                                  # hand off; ready for the next start now
         self.state = "idle"
+        self._telemetry()
+
+    def _drain_verdicts(self, capture_id: str | None) -> dict | None:
+        """Match-or-quarantine: a verdict either names the capture being
+        finalized, or it is parked loudly. Submit verdicts BEFORE ringing stop;
+        anything later belongs to the post-hoc path (workspace/cloud PATCH)."""
+        matched = None
+        for req in self.verdicts.drain():
+            if capture_id and req.get("capture_id") == capture_id and matched is None:
+                matched = req
+            elif capture_id and req.get("capture_id") == capture_id:
+                self.verdicts.quarantine(req, f"duplicate verdict for {capture_id}")
+            else:
+                self.verdicts.quarantine(
+                    req, f"capture_id mismatch (current: {capture_id or 'none'})")
+        return matched
+
+    def _telemetry(self) -> None:
+        cell = types.RecorderTelemetry(
+            timestamp=time.time(), frame_id=0,
+            state=1 if self.state == "recording" else 0,
+            frames=len(self.rows), capture_id=self.capture_id.encode())
+        self.telemetry.write(cell)
 
     def _collect(self) -> None:
         still: list[Future] = []

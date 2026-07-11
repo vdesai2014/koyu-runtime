@@ -40,7 +40,7 @@ from aiohttp import web
 
 from ipc import types, events
 from ipc.service import _LazyReader, _LazySubscriber
-from services.param_server import Inbox
+from services.inbox import Inbox, inbox_path
 
 PORT = int(os.environ.get("BRIDGE_PORT", "8765"))
 STATIC_DIR = os.environ.get("BRIDGE_STATIC_DIR", "")
@@ -86,7 +86,11 @@ def serialize_struct(data) -> dict | None:
         if field_name in LARGE_FIELD_SKIP:
             continue
         val = getattr(data, field_name)
-        if hasattr(val, "__len__") and not isinstance(val, (str, bytes)):
+        if isinstance(val, bytes):
+            # c_char arrays (capture_id, task, ...) read back as bytes; JSON
+            # can't carry bytes, and one bad field would kill the whole stream
+            val = val.decode("utf-8", errors="replace")
+        elif hasattr(val, "__len__") and not isinstance(val, str):
             if len(val) > LARGE_ARRAY_THRESHOLD:
                 continue
             val = list(val)
@@ -195,7 +199,7 @@ async def ws_handler(request):
                     r = {"key": key, "value": req.get("value")}
                     if req.get("persist"):
                         r["persist"] = True
-                    Inbox(RUNTIME_DIR / "services" / "param_server" / "inbox" / topic.replace("/", "~")).submit(r)
+                    Inbox(inbox_path(RUNTIME_DIR, "param_server", topic.replace("/", "~"))).submit(r)
                     print(f"[bridge] set-param {topic} {key}={r['value']}", flush=True)
     except Exception:
         pass
@@ -204,6 +208,135 @@ async def ws_handler(request):
             t.cancel()
         print("[bridge] WS client disconnected", flush=True)
     return ws
+
+
+# Camera serving — the video_bridge seam (design doc §6): frames in from a
+# camera stream, served out over local HTTP. Two shapes on one encode path:
+# /frame/<topic> (single JPEG, for snapshots/agents) and /mjpeg/<topic>
+# (multipart/x-mixed-replace push stream — browser-native in a plain <img>,
+# no polling, no sampling jitter). Each viewer gets its own depth-1
+# subscriber (independent per-subscriber buffers; the recorder's subscription
+# is untouched) and drains to newest, so a slow client only ever drops frames.
+#
+# PERFORMANCE NOTE: JPEG encodes run in the default thread executor so the
+# event loop (telemetry + ring-event, i.e. the VERB path) never blocks on
+# pixels. At sim scale (128px, ~1 ms/encode) this is noise. At real-robot
+# scale (640x480 x N cams x 30 fps ≈ 8 ms/encode each) the bridge process
+# will saturate a core and viewer fps will sag first. If that happens, break
+# this block out into the dedicated Rust video_bridge the design doc
+# originally sketched (os/services/video_bridge is the reference; port it to
+# pub/sub streams + turbojpeg). The URL contract (/frame, /mjpeg?fps=) is the
+# seam — promotion means a new port and one frontend proxy line, nothing else.
+_frame_subs: dict = {}
+_frame_cache: dict[str, bytes] = {}
+_BOUNDARY = "koyuframe"
+
+
+def _encode_jpeg(topic: str, v) -> bytes | None:
+    """ImageCell-shaped struct -> JPEG bytes; caches per topic. Falls back to
+    the cached last frame when nothing new (or nothing image-shaped) arrived."""
+    if v is not None and all(hasattr(v, f) for f in ("width", "height", "data")):
+        from io import BytesIO
+
+        import numpy as np
+        from PIL import Image
+
+        n = v.height * v.width * 3
+        img = np.frombuffer(bytes(v.data[:n]), dtype=np.uint8).reshape(v.height, v.width, 3)
+        buf = BytesIO()
+        Image.fromarray(img).save(buf, format="JPEG", quality=85)
+        _frame_cache[topic] = buf.getvalue()
+    return _frame_cache.get(topic)
+
+
+def _stream_info(topic: str):
+    info = topic_planes().get(topic)
+    return info if info is not None and info[1] == "stream" else None
+
+
+async def frame_handler(request):
+    topic = request.match_info["topic"]
+    info = _stream_info(topic)
+    if info is None:
+        return web.Response(status=404, text=f"unknown stream topic {topic!r}\n")
+    sub = _frame_subs.get(topic)
+    if sub is None:
+        sub = _frame_subs[topic] = _LazySubscriber(topic, types.resolve(info[0]), buffer=1)
+    loop = asyncio.get_event_loop()
+    jpeg = await loop.run_in_executor(None, _encode_jpeg, topic, sub.latest())
+    if jpeg is None:
+        return web.Response(status=204)                    # no frame published yet
+    return web.Response(body=jpeg, content_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+
+
+async def mjpeg_handler(request):
+    """One long-lived response per <img>; each newly published frame is pushed
+    as a multipart part, capped by ?fps= (default 30). Opens with the cached
+    last frame so an idle runtime still shows its most recent view."""
+    topic = request.match_info["topic"]
+    info = _stream_info(topic)
+    if info is None:
+        return web.Response(status=404, text=f"unknown stream topic {topic!r}\n")
+    try:
+        fps = min(max(float(request.query.get("fps", 30)), 1.0), 120.0)
+    except ValueError:
+        fps = 30.0
+    min_dt = 1.0 / fps
+
+    resp = web.StreamResponse(headers={
+        "Content-Type": f"multipart/x-mixed-replace; boundary={_BOUNDARY}",
+        "Cache-Control": "no-store",
+    })
+    await resp.prepare(request)
+
+    async def push(jpeg: bytes) -> None:
+        await resp.write(
+            f"--{_BOUNDARY}\r\nContent-Type: image/jpeg\r\n"
+            f"Content-Length: {len(jpeg)}\r\n\r\n".encode() + jpeg + b"\r\n")
+
+    sub = _LazySubscriber(topic, types.resolve(info[0]), buffer=1)
+    loop = asyncio.get_event_loop()
+    last_fid = None
+    last_push = 0.0
+    KEEPALIVE_S = 3.0        # re-push the last frame while idle: keeps refreshes
+                             # showing something AND probes the socket so a dead
+                             # viewer exits and frees its subscriber slot — an
+                             # idle stream must never hold slots forever (each
+                             # viewer takes one of the publisher's max_subscribers)
+    probe_at = loop.time() + 2.0
+    print(f"[bridge] mjpeg viewer on {topic} (fps<={fps:g})", flush=True)
+    try:
+        cached = _frame_cache.get(topic)
+        if cached is not None:
+            await push(cached)
+        while True:
+            if request.transport is None or request.transport.is_closing():
+                break                              # viewer went away between frames
+            now = loop.time()
+            if probe_at is not None and now >= probe_at:
+                probe_at = None                    # silent-failure guard, once
+                if sub._ensure() is None:
+                    print(f"[bridge] mjpeg {topic}: subscriber not connected — "
+                          "publisher down, or its max_subscribers slots are full",
+                          flush=True)
+            if now - last_push >= min_dt:
+                v = sub.latest()
+                if v is not None and getattr(v, "frame_id", None) != last_fid:
+                    jpeg = await loop.run_in_executor(None, _encode_jpeg, topic, v)
+                    if jpeg is not None:
+                        last_fid, last_push = v.frame_id, now
+                        await push(jpeg)
+                elif now - last_push >= KEEPALIVE_S:
+                    last_push = now
+                    if (jpeg := _frame_cache.get(topic)) is not None:
+                        await push(jpeg)
+            await asyncio.sleep(0.005)
+    except (asyncio.CancelledError, ConnectionError):
+        pass
+    finally:
+        print(f"[bridge] mjpeg viewer left {topic}", flush=True)
+    return resp
 
 
 async def index_handler(request):
@@ -218,6 +351,8 @@ async def index_handler(request):
 async def run_bridge():
     app = web.Application()
     app.router.add_get("/ws", ws_handler)
+    app.router.add_get("/frame/{topic:.+}", frame_handler)
+    app.router.add_get("/mjpeg/{topic:.+}", mjpeg_handler)
     app.router.add_get("/", index_handler)
     d = _static_dir()
     if d is not None and d.is_dir():

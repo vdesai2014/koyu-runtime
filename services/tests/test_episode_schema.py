@@ -49,9 +49,13 @@ def test_sidecar_requires_length_and_fps():
 
 
 def test_sidecar_excludes_store_owned_fields():
+    # reward/events moved INTO the sidecar with the verdict inbox (interfaces.md):
+    # they are capture-time judgments now, not store-resolved metadata.
     dumped = EpisodeSidecar(length=1, fps=30.0).model_dump()
-    for store_field in ("id", "manifest_ids", "files", "size_bytes", "reward"):
+    for store_field in ("id", "manifest_ids", "files", "size_bytes"):
         assert store_field not in dumped
+    assert "reward" in dumped and dumped["reward"] is None
+    assert dumped["events"] == []
 
 
 def test_sidecar_roundtrips_through_json():

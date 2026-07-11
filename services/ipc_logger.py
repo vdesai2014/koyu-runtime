@@ -1,12 +1,19 @@
 """IPC logger — passive, always-on recorder for agent introspection.
 
-Logs the topics assigned to it in services.yaml (its own ipc reads/subscribes/
-listens), on change, so an agent can `tail` a topic and pull recent frames.
-Read-only — it never writes a topic, so it can't perturb what it observes. All
-output lives under <runtime>/ipc_logger/<topic>/ , one folder per topic/channel:
+By default it logs EVERY topic and event channel any service declares in
+services.yaml (auto-discovery: declare a topic, get observability). Give the
+logger its own ipc block to override with an explicit list, or an
+``exclude:`` glob list in its stanza to silence noisy topics. Logs on
+change, so an agent can `koyu tail` a topic and `koyu frame` recent images.
+Read-only — it never writes a topic, so it can't perturb what it observes.
+All output lives under <runtime>/services/ipc_logger/<topic>/ :
   - structured topics -> state.jsonl   (size-capped, rotating)
   - image topics       -> frames/*.jpg (size-capped ring)
   - event channels     -> events.jsonl (size-capped, rotating)
+
+Note: events are typeless, so nothing else forces their declaration — but
+only DECLARED channels (ipc.events.notifies/listens) are discovered here.
+Declaring your doorbells is what makes their history tailable.
 """
 
 from __future__ import annotations
@@ -16,8 +23,10 @@ import logging
 import logging.handlers
 import os
 import time
+from fnmatch import fnmatch
 from pathlib import Path
 
+import yaml
 from PIL import Image
 
 from ipc import types
@@ -127,9 +136,43 @@ class IpcLogger(Service):
         log.info(json.dumps(rec))
 
 
+def discover_ipc(home, exclude=()):
+    """Every topic and channel any service declares, folded into the logger's
+    own config shape. blackboard writes|reads -> reads; stream
+    publishes|subscribes -> subscribes; event notifies|listens -> listens.
+    Dict-merge dedupes topics across services (boot typecheck already keeps
+    their type declarations consistent)."""
+    raw = yaml.safe_load((Path(home) / "services.yaml").read_text()) or {}
+    bb, st, ev = {}, {}, set()
+    for stanza in raw.values():
+        ipc = (stanza or {}).get("ipc") or {}
+        for direction in ("writes", "reads"):
+            bb.update((ipc.get("blackboard") or {}).get(direction) or {})
+        for direction in ("publishes", "subscribes"):
+            st.update((ipc.get("streams") or {}).get(direction) or {})
+        for direction in ("notifies", "listens"):
+            ev.update((ipc.get("events") or {}).get(direction) or [])
+
+    def keep(topic):
+        return not any(fnmatch(topic, pattern) for pattern in exclude)
+
+    return {
+        "blackboard": {"reads": {t: s for t, s in bb.items() if keep(t)}},
+        "streams": {"subscribes": {t: s for t, s in st.items() if keep(t)}},
+        "events": {"listens": sorted(t for t in ev if keep(t))},
+    }
+
+
 def main():
     home = os.environ["KOYU_RUNTIME_DIR"]
-    IpcLogger(home, read_service_ipc(home, "ipc_logger")).run()
+    own = read_service_ipc(home, "ipc_logger")
+    if any(own.values()):
+        ipc = own                                  # explicit block wins
+    else:
+        raw = yaml.safe_load((Path(home) / "services.yaml").read_text()) or {}
+        exclude = (raw.get("ipc_logger") or {}).get("exclude") or []
+        ipc = discover_ipc(home, exclude)
+    IpcLogger(home, ipc).run()
 
 
 if __name__ == "__main__":

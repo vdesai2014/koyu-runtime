@@ -22,8 +22,21 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
-[project.scripts]
-koyu = "cli.main:main"
+# No console script of our own: the `koyu` binary belongs to koyu-cli (the
+# umbrella). We plug our verbs into it via the koyu.plugins entry-point group;
+# install koyu-cli alongside and `koyu up` routes here. `python -m cli.main`
+# always works regardless.
+[project.entry-points."koyu.plugins"]
+up = "cli.main:main"
+down = "cli.main:main"
+status = "cli.main:main"
+restart = "cli.main:main"
+apply = "cli.main:main"
+logs = "cli.main:main"
+set = "cli.main:main"
+get = "cli.main:main"
+tail = "cli.main:main"
+frame = "cli.main:main"
 
 [tool.setuptools.packages.find]
 include = ["warden*", "ipc*", "cli*", "services*"]

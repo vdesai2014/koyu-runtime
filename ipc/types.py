@@ -71,6 +71,22 @@ class GlobalConfig(ctypes.Structure):
     ]
 
 
+class RecorderTelemetry(ctypes.Structure):
+    """Recorder's live state, published latest-value on ``recorder/telemetry``.
+    ``capture_id`` is the 32-hex identity of the recording in progress — the
+    SAME id the episode carries forever (ingest derives ep_<capture_id>). Any
+    process (eval driver, rater UI) reads it here to address feedback. Empty
+    while idle."""
+    _fields_ = [
+        ("timestamp", ctypes.c_double),
+        ("frame_id", ctypes.c_uint64),
+        ("state", ctypes.c_uint8),                     # 0 idle | 1 recording
+        ("_pad", ctypes.c_uint8 * 7),
+        ("frames", ctypes.c_uint64),                   # rows captured so far
+        ("capture_id", ctypes.c_char * 33),            # 32-hex + NUL
+    ]
+
+
 class RecorderConfig(ctypes.Structure):
     """Data-recorder params, published latest-value by param_server.
     record_hz: requested recording rate; <= 0 records at the clock's native rate."""

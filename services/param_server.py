@@ -19,36 +19,9 @@ from pathlib import Path
 
 from ipc import types
 from ipc.service import Service, read_service_ipc
+from services.inbox import Inbox, inbox_path
 
 META = ("timestamp", "frame_id")    # struct header fields, not params
-
-
-class Inbox:
-    """Durable multi-writer command queue: any process atomically drops a JSON
-    request file; the owner drains them in order. Survives the writer's death —
-    the file persists, unlike an in-flight iceoryx2 sample."""
-
-    def __init__(self, path):
-        self.dir = Path(path)
-        self.dir.mkdir(parents=True, exist_ok=True)
-
-    def submit(self, req: dict) -> None:
-        stem = f"{time.time_ns()}_{os.getpid()}"
-        tmp = self.dir / f".{stem}.tmp"
-        tmp.write_text(json.dumps(req))
-        tmp.rename(self.dir / f"{stem}.json")          # atomic publish
-
-    def drain(self) -> list[dict]:
-        out = []
-        for f in sorted(self.dir.glob("*.json")):
-            # files are atomic + complete, so a parse error is genuine garbage:
-            # drop it loudly (don't crash-loop the server) — any OTHER error bubbles.
-            try:
-                out.append(json.loads(f.read_text()))
-            except json.JSONDecodeError as exc:
-                print(f"[inbox] dropping malformed request {f.name}: {exc}", flush=True)
-            f.unlink()
-        return out
 
 
 def _typename(spec):
@@ -77,7 +50,7 @@ class ParamServer(Service):
                     raise RuntimeError(f"param_server: {topic} param '{f}' has no value in {file.name}")
             self.topics[topic] = {
                 "w": self.writer(topic, T), "T": T, "params": params, "file": file,
-                "inbox": Inbox(base / "inbox" / slug), "frame": 0,
+                "inbox": Inbox(inbox_path(self.home, self.name, slug)), "frame": 0,
             }
             self._publish(self.topics[topic])
         self.tick(20)
