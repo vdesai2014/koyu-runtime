@@ -17,6 +17,7 @@ dependencies = [
     "pyarrow>=14",
     "av>=11",
     "aiohttp>=3.9",
+    "koyu-cli>=0.1",       # owns the `koyu` binary; our verbs plug into it
 ]
 
 [project.optional-dependencies]
