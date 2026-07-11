@@ -35,7 +35,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return args.handler(rt, args)
-    except (boot.BootError, SupervisordError, ServicesError) as err:
+    except (boot.BootError, SupervisordError, ServicesError,
+            checks.TypeCheckError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
 
