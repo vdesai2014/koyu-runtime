@@ -42,6 +42,8 @@ from .inbox import Inbox, inbox_path
 JITTER_NS = 5_000_000     # staleness slack on top of one source period
 TICK_HZ = 200             # clock poll cadence (Hz), far above any camera rate
 CLOCK_BUFFER = 8          # clock frames queued between ticks (absorbs tick jitter)
+PAIR_CACHE = 4 * CLOCK_BUFFER  # held lockstep answers per paired source; must cover
+                               # the deferred window or a matchable frame can abort
 CLOCK_TIMEOUT_S = 1.0     # no clock frame for this long while recording -> abort
 MAX_FRAMES = 1_800        # whole-episode row cap (~60s @ 30fps); auto-stop, never discard
 ENCODING = {"video_codec": "libx264", "pix_fmt": "yuv420p"}
@@ -240,7 +242,8 @@ class DataRecorder(Service):
         self.capture_id = ""                          # minted at START; "" = idle
         self.deferred: list = []                      # clock frames awaiting a paired match
         self.rows: list[tuple[int, dict]] = []         # (clock ts_ns, {feature: value})
-        self.cache: dict[str, Any] = {}                # topic -> latest sample (non-clock)
+        self.cache: dict[str, Any] = {}                # topic -> latest sample (window sources)
+        self.pair_cache: dict[str, dict[int, Any]] = {}  # topic -> {frame_id: sample} (paired)
         self.snap: RecordingContext | None = None
         self.rec_hz = 0.0                              # snapshotted record_hz; 0 = native
         self.period_ns = 0
@@ -253,8 +256,11 @@ class DataRecorder(Service):
         _validate_sources(self.sources)
         self.recordings.mkdir(exist_ok=True)
         _sweep_tmp(self.recordings)                    # crashed runs leave .tmp-* behind
-        # the clock gets a small queue so a late tick can't drop a frame; the
-        # others are depth-1 latest-value reads (blackboard semantics over pub/sub).
+        # the clock and every paired source get a small queue so a late tick
+        # can't drop a frame: a lockstep faster than the tick would otherwise
+        # overwrite an unconsumed answer, leaving its clock frame unmatchable
+        # forever (one hole aborts the episode). Window sources stay depth-1
+        # latest-value reads (blackboard semantics over pub/sub).
         #
         # TODO(multi-buffer capture): non-clock sources at buffer=1 are sampled
         # onto the clock spine — samples faster than the clock are DECIMATED by
@@ -274,7 +280,7 @@ class DataRecorder(Service):
         # misalignment. Time is data: inject timestamps, no sleeps.
         self.subs = {
             s.topic: self.subscriber(s.topic, types.resolve(s.type_name),
-                                     buffer=CLOCK_BUFFER if s is self.clock else 1)
+                                     buffer=CLOCK_BUFFER if (s is self.clock or s.paired) else 1)
             for s in self.sources
         }
         self.config = self.reader("recorder/config", types.RecorderConfig)
@@ -339,8 +345,14 @@ class DataRecorder(Service):
         return max(hz, 0.0)
 
     def _capture(self) -> None:
-        for s in self.others:                          # refresh the latest-value cache
-            if (sample := self.subs[s.topic].latest()) is not None:
+        for s in self.others:                          # refresh the source caches
+            if s.paired:                               # lockstep answers: drain the queue and
+                held = self.pair_cache.setdefault(s.topic, {})  # hold by exact frame_id, so a
+                for sample in self.subs[s.topic].drain():       # fast lockstep can't overwrite
+                    held[int(sample.frame_id)] = sample         # an unconsumed answer
+                while len(held) > PAIR_CACHE:
+                    del held[min(held)]
+            elif (sample := self.subs[s.topic].latest()) is not None:
                 self.cache[s.topic] = sample
         frames = self.subs[self.clock.topic].drain()
         if frames:
@@ -361,11 +373,10 @@ class DataRecorder(Service):
         wait — the caller keeps the frame and retries next tick."""
         # paired sources first: an unmatched answer means "still cooking", and
         # the frame must not pass the fence/gate until it can actually land
+        fid = getattr(frame, "frame_id", None)
         for s in self.others:
-            if s.paired:
-                c = self.cache.get(s.topic)
-                if c is None or getattr(c, "frame_id", None) != getattr(frame, "frame_id", None):
-                    return False
+            if s.paired and fid not in self.pair_cache.get(s.topic, {}):
+                return False
         ts = int(frame.timestamp * 1e9)                # wall-clock seconds -> ns
         if ts < self.t0_ns:
             return True                                # queued while idle
@@ -386,7 +397,8 @@ class DataRecorder(Service):
                 return True                            # leading edge: wait for the source
         self.rows.append((ts, {
             self.clock.feature: self.clock.extract(frame),
-            **{s.feature: s.extract(self.cache[s.topic]) for s in self.others},
+            **{s.feature: s.extract(self.pair_cache[s.topic][fid] if s.paired
+                                    else self.cache[s.topic]) for s in self.others},
         }))
         return True
 
