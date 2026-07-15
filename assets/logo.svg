@@ -1,0 +1,11 @@
+<svg width="560" height="140" viewBox="0 0 560 140" xmlns="http://www.w3.org/2000/svg">
+  <rect x="1" y="1" width="558" height="138" rx="14" fill="#0a0a09" stroke="#1a1816" stroke-width="2"/>
+  <!-- pulse glyph: a heartbeat on the wire, data-then-doorbell -->
+  <polyline points="42,78 74,78 86,52 102,96 114,70 126,78 158,78"
+            fill="none" stroke="#E87F24" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="158" cy="78" r="7" fill="#E87F24"/>
+  <text x="196" y="90" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace"
+        font-size="52" font-weight="600" fill="#E87F24">koyu</text>
+  <text x="336" y="90" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace"
+        font-size="52" font-weight="400" fill="#6e645a">runtime</text>
+</svg>

@@ -25,23 +25,29 @@ dev = ["pytest>=8"]
 
 # No console script of our own: the `koyu` binary belongs to koyu-cli (the
 # umbrella). We plug our verbs into it via the koyu.plugins entry-point group;
-# install koyu-cli alongside and `koyu up` routes here. `python -m cli.main`
-# always works regardless.
+# install koyu-cli alongside and `koyu up` routes here.
+# `python -m koyu_runtime.cli.main` always works regardless.
 [project.entry-points."koyu.plugins"]
-up = "cli.main:main"
-down = "cli.main:main"
-status = "cli.main:main"
-restart = "cli.main:main"
-apply = "cli.main:main"
-logs = "cli.main:main"
-set = "cli.main:main"
-get = "cli.main:main"
-tail = "cli.main:main"
-frame = "cli.main:main"
+up = "koyu_runtime.cli.main:main"
+down = "koyu_runtime.cli.main:main"
+status = "koyu_runtime.cli.main:main"
+restart = "koyu_runtime.cli.main:main"
+apply = "koyu_runtime.cli.main:main"
+logs = "koyu_runtime.cli.main:main"
+set = "koyu_runtime.cli.main:main"
+get = "koyu_runtime.cli.main:main"
+tail = "koyu_runtime.cli.main:main"
+frame = "koyu_runtime.cli.main:main"
+context = "koyu_runtime.cli.main:main"
 
 [tool.setuptools.packages.find]
-include = ["warden*", "ipc*", "cli*", "services*"]
-exclude = ["warden.tests*", "ipc.tests*", "cli.tests*", "services.tests*"]
+include = ["koyu_runtime*"]
+exclude = ["*.tests", "*.tests.*"]
 
 [tool.pytest.ini_options]
-testpaths = ["warden/tests", "ipc/tests", "cli/tests", "services/tests"]
+testpaths = [
+    "koyu_runtime/warden/tests",
+    "koyu_runtime/ipc/tests",
+    "koyu_runtime/cli/tests",
+    "koyu_runtime/services/tests",
+]
