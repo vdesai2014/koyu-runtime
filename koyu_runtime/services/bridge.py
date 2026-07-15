@@ -339,6 +339,17 @@ async def mjpeg_handler(request):
     return resp
 
 
+async def context_handler(request):
+    """The recording context, read-only: whatever provenance is armed right
+    now (koyu context / an orchestrator's flags). Browser surfaces show it so
+    the operator can see what the next recording will be stamped with."""
+    path = Path(os.environ["KOYU_RUNTIME_DIR"]) / "recording-context.json"
+    try:
+        return web.json_response(json.loads(path.read_text()))
+    except (FileNotFoundError, ValueError):
+        return web.json_response({})
+
+
 async def index_handler(request):
     d = _static_dir()
     if d is not None:
@@ -353,6 +364,7 @@ async def run_bridge():
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/frame/{topic:.+}", frame_handler)
     app.router.add_get("/mjpeg/{topic:.+}", mjpeg_handler)
+    app.router.add_get("/context", context_handler)
     app.router.add_get("/", index_handler)
     d = _static_dir()
     if d is not None and d.is_dir():
