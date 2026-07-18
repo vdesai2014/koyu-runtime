@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/SkEJNJ9NJ"><img src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://discord.gg/53AXspMaN"><img src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://koyu.dev/docs"><img src="https://img.shields.io/badge/docs-koyu.dev-E87F24" alt="Docs"></a>
 </p>
 
@@ -98,7 +98,7 @@ koyu status
 ## Contributing
 
 The best way to contribute right now is through the
-[Discord](https://discord.gg/SkEJNJ9NJ): architecture questions, design
+[Discord](https://discord.gg/53AXspMaN): architecture questions, design
 arguments, and bug reports all welcome. Pull requests stay closed while the
 codebase is moving this fast.
 
