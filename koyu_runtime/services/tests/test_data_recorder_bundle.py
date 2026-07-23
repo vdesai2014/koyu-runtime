@@ -2,6 +2,7 @@ import av
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
+from datetime import datetime, timezone
 
 from koyu_runtime.services.data_recorder import Source, finalize
 from koyu_runtime.services.episode_schema import EpisodeSidecar, RecordingContext
@@ -51,6 +52,7 @@ def test_finalize_writes_bundle(tmp_path):
     assert sc.requested_manifest == "teleop" and sc.task == "pick"
     assert sc.fps == pytest.approx(100.0)       # (3-1)/(20ms), measured from real stamps
     assert sc.record_hz is None                 # native-rate capture
+    assert sc.recorded_at == datetime.fromtimestamp(0.01, tz=timezone.utc)
     assert sc.features["observation.images.top"]["shape"] == [32, 32, 3]
 
 

@@ -133,6 +133,7 @@ def finalize(recordings_dir: Path, ctx: RecordingContext, rows: list,
                             [r[s.feature] for _, r in rows], fps)
 
         sidecar = EpisodeSidecar(**ctx.model_dump(), length=n, fps=fps,
+                                 recorded_at=datetime.fromtimestamp(ts[0] / 1e9, tz=timezone.utc),
                                  record_hz=record_hz or None,
                                  features=_features(sources, rows[0][1]), encoding=ENCODING,
                                  **({"capture_id": capture_id} if capture_id else {}),
