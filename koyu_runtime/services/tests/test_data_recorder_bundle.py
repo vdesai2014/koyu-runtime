@@ -2,6 +2,7 @@ import av
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
+from datetime import datetime, timezone
 
 from koyu_runtime.services.data_recorder import Source, finalize
 from koyu_runtime.services.episode_schema import EpisodeSidecar, RecordingContext
@@ -43,7 +44,7 @@ def test_finalize_writes_bundle(tmp_path):
     tbl = pq.read_table(out.path / "data.parquet")
     assert tbl.num_rows == 3
     assert set(tbl.column_names) >= {"step", "timestamp", "observation.state"}
-    assert _decode_count(out.path / "videos" / "top.mp4") == 3      # row <-> frame, 1:1
+    assert _decode_count(out.path / "observation.images.top.mp4") == 3  # row <-> frame, 1:1
 
     sc = EpisodeSidecar.model_validate_json((out.path / "episode.json").read_text())
     assert sc.length == 3
@@ -51,7 +52,11 @@ def test_finalize_writes_bundle(tmp_path):
     assert sc.requested_manifest == "teleop" and sc.task == "pick"
     assert sc.fps == pytest.approx(100.0)       # (3-1)/(20ms), measured from real stamps
     assert sc.record_hz is None                 # native-rate capture
+    assert sc.recorded_at == datetime.fromtimestamp(0.01, tz=timezone.utc)
     assert sc.features["observation.images.top"]["shape"] == [32, 32, 3]
+    assert {p.name for p in out.path.iterdir()} == {
+        "data.parquet", "episode.json", "observation.images.top.mp4",
+    }
 
 
 def test_finalize_records_nominal_next_to_measured(tmp_path):

@@ -70,6 +70,14 @@ def test_validate_requires_positive_rate():
 
 
 def test_validate_rejects_video_filename_collision():
-    # observation.images.top and left.top both want top.mp4
+    # Two topics cannot author the same canonical feature-key filename.
     with pytest.raises(ValueError, match="collision"):
-        _validate_sources([_video("a", "observation.images.top"), _video("b", "left.top")])
+        _validate_sources([
+            _video("a", "observation.images.top"),
+            _video("b", "observation.images.top"),
+        ])
+
+
+def test_validate_rejects_nested_video_filename():
+    with pytest.raises(ValueError, match="flat filename"):
+        _validate_sources([_video("a", "observation/images/top")])
