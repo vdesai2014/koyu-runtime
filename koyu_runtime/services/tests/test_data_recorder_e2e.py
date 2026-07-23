@@ -114,7 +114,7 @@ def test_e2e_records_one_episode(tmp_path):
         bundle = _bundles(home)[0]
 
         rows = pq.read_table(bundle / "data.parquet").num_rows
-        with av.open(str(bundle / "videos" / "top.mp4")) as c:
+        with av.open(str(bundle / "observation.images.top.mp4")) as c:
             frames = sum(1 for _ in c.decode(video=0))
         assert rows == frames                    # the 1:1 invariant, captured end to end
         assert rows >= 3

@@ -123,13 +123,13 @@ def finalize(recordings_dir: Path, ctx: RecordingContext, rows: list,
 
     tmp = recordings_dir / f".tmp-{uuid4().hex}"
     try:
-        (tmp / "videos").mkdir(parents=True)
+        tmp.mkdir(parents=True)
         _write_parquet(tmp / "data.parquet", ts,
                        {s.feature: [r[s.feature] for _, r in rows]
                         for s in sources if s.kind == "column"})
         for s in sources:
             if s.kind == "video":
-                _encode_mp4(tmp / "videos" / _vid(s.feature),
+                _encode_mp4(tmp / _vid(s.feature),
                             [r[s.feature] for _, r in rows], fps)
 
         sidecar = EpisodeSidecar(**ctx.model_dump(), length=n, fps=fps,
@@ -150,7 +150,7 @@ def finalize(recordings_dir: Path, ctx: RecordingContext, rows: list,
 
 
 def _vid(feature: str) -> str:
-    return f"{feature.split('.')[-1]}.mp4"
+    return f"{feature}.mp4"
 
 
 def _dirname(ts_ns: int) -> str:
@@ -211,6 +211,8 @@ def _validate_sources(sources: list[Source]) -> None:
                 "(stored as list<float32>)"
             )
     names = [_vid(s.feature) for s in videos]
+    if any(Path(name).name != name for name in names):
+        raise ValueError(f"data_recorder: video feature must map to a flat filename: {names}")
     if len(names) != len(set(names)):
         raise ValueError(f"data_recorder: video filename collision: {names}")
 
@@ -360,7 +362,10 @@ class DataRecorder(Service):
             self.clock_seen = time.monotonic()         # liveness, even for unkept frames
         self.deferred.extend(frames)
         while self.deferred and self.state == "recording":
-            if self._frame(self.deferred[0]):          # consumed (recorded/gated/abort)
+            consumed = self._frame(self.deferred[0])
+            if self.state != "recording":              # _frame() may abort + reset the queue
+                break
+            if consumed:                               # recorded/gated/fenced
                 self.deferred.pop(0)
             else:                                       # paired wait: keep, retry next tick
                 if len(self.deferred) > CLOCK_BUFFER:
